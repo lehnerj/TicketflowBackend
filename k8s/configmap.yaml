@@ -8,3 +8,6 @@ data:
   CASSANDRA_PORT:            "9042"
   CASSANDRA_KEYSPACE:        "ticketflow"
   CASSANDRA_DATACENTER:      "datacenter1"
+  # CPU burn per WRITE request (milliseconds).  Increase for more load,
+  # set to "0" to disable.  Picked up by app.cpu-burn-ms in application.yml.
+  CPU_BURN_MS:               "10"

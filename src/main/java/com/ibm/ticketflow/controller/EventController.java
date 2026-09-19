@@ -7,10 +7,12 @@ import com.ibm.ticketflow.model.TicketEvent;
 import com.ibm.ticketflow.repository.TicketEventRepository;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -19,7 +21,7 @@ import java.util.UUID;
  * Primary REST endpoint for the TicketFlow demo backend.
  *
  * <pre>
- * POST /api/event
+ * POST /api/event/{action}/{outcome}/{iteration}
  *   body: EventRequest JSON
  *   → 200  when expectedOutcome == SUCCESS and action is processed
  *   → 500  when expectedOutcome == FAILURE  (intentional error path)
@@ -40,14 +42,52 @@ public class EventController {
 
     private final TicketEventRepository repository;
 
+    /**
+     * Target CPU burn duration per WRITE request in milliseconds.
+     * Set via environment variable CPU_BURN_MS (default: 10).
+     * Set to 0 to disable the burn entirely.
+     */
+    @Value("${app.cpu-burn-ms:10}")
+    private long cpuBurnMs;
+
     public EventController(TicketEventRepository repository) {
         this.repository = repository;
     }
 
-    // ── POST /api/event ────────────────────────────────────────────────────────
+    // ── CPU burn (Sieve of Eratosthenes, time-bounded) ─────────────────────────
+    //
+    // Runs the sieve repeatedly until the target wall-clock duration has elapsed.
+    // Using a real algorithm (not Thread.sleep) ensures the CPU core is actually
+    // busy — visible as real CPU usage in Turbonomic and as a custom span in
+    // Instana.  The sieve limit is chosen so one pass takes ~1 ms on a modest
+    // container, giving reasonable granularity without overshooting badly.
 
-    @PostMapping("/event")
-    public ResponseEntity<?> handleEvent(@RequestBody EventRequest request) {
+    private void burnCpu(long targetMs) {
+        if (targetMs <= 0) return;
+        final long deadline = System.nanoTime() + targetMs * 1_000_000L;
+        final int  limit    = 50_000; // sieve up to 50 000 per pass
+        do {
+            boolean[] sieve = new boolean[limit + 1];
+            Arrays.fill(sieve, true);
+            sieve[0] = sieve[1] = false;
+            for (int i = 2; (long) i * i <= limit; i++) {
+                if (sieve[i]) {
+                    for (int j = i * i; j <= limit; j += i) {
+                        sieve[j] = false;
+                    }
+                }
+            }
+        } while (System.nanoTime() < deadline);
+    }
+
+    // ── POST /api/event/{action}/{outcome}/{iteration} ─────────────────────────
+
+    @PostMapping("/event/{action}/{outcome}/{iteration}")
+    public ResponseEntity<?> handleEvent(
+            @PathVariable String action,
+            @PathVariable String outcome,
+            @PathVariable int iteration,
+            @RequestBody EventRequest request) {
 
         log.info("Received request iteration={} sentAt={} action={} expectedOutcome={}",
                 request.iteration(), request.sentAt(), request.action(), request.expectedOutcome());
@@ -67,6 +107,7 @@ public class EventController {
 
         // ── WRITE path ────────────────────────────────────────────────────────
         if (request.action() == Action.WRITE) {
+            burnCpu(cpuBurnMs);
             TicketEvent event = new TicketEvent(
                     request.iteration(),
                     request.sentAt(),

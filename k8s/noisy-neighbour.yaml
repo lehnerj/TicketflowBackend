@@ -1,0 +1,87 @@
+# ── Noisy-Neighbour CPU stressor ──────────────────────────────────────────────
+#
+# Deploys a stress-ng pod into the ticketflow namespace that burns CPU on the
+# SAME node as the ticketflow-backend pod (enforced by podAffinity).
+#
+# Demo flow:
+#   1. Apply this manifest  →  CPU saturation on the shared node
+#   2. Observe rising response times in Instana
+#   3. Turbonomic detects the resource contention and recommends (or executes)
+#      a pod move of ticketflow-backend to a less-loaded node
+#   4. Response times stabilise on the new node
+#
+# Usage:
+#   kubectl apply  -f k8s/noisy-neighbour.yaml   # start  noisy neighbour
+#   kubectl delete -f k8s/noisy-neighbour.yaml   # stop   noisy neighbour
+#
+# Tune the load:
+#   --cpu          number of CPU stressor workers  (default: 2)
+#   --cpu-load     target utilisation per worker   (default: 80 %)
+#   Increase both values if your nodes have many cores or low baseline load.
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: noisy-neighbour
+  namespace: ticketflow
+  labels:
+    app: noisy-neighbour
+    role: demo-stressor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: noisy-neighbour
+  template:
+    metadata:
+      labels:
+        app: noisy-neighbour
+        role: demo-stressor
+    spec:
+      # ── Land on the SAME node as ticketflow-backend ──────────────────────────
+      # podAffinity with requiredDuringScheduling ensures the stressor pod is
+      # always co-located with the backend pod.  If the backend is later moved
+      # by Turbonomic the stressor stays behind — which is exactly what makes
+      # the demo work: the backend escapes the noisy node.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: ticketflow-backend
+              topologyKey: kubernetes.io/hostname
+
+      # ── OpenShift compatibility ──────────────────────────────────────────────
+      securityContext:
+        runAsNonRoot: true
+
+      containers:
+        - name: stressor
+          image: docker.io/library/ubuntu:24.04
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+
+          # Install stress-ng at start-up and run it immediately.
+          # No custom image needed — ubuntu:24.04 is already pulled for most clusters.
+          command:
+            - /bin/bash
+            - -c
+            - |
+              apt-get update -qq && apt-get install -y --no-install-recommends stress-ng
+              echo "▶ Starting CPU stress: 2 workers at 80% each"
+              exec stress-ng --cpu 2 --cpu-load 80 --metrics-brief --timeout 0
+
+          resources:
+            # Requests are intentionally LOW so the scheduler places this pod
+            # on the same node as the backend without requiring spare capacity.
+            # The actual CPU consumption (~1.6 cores) creates the contention
+            # that Turbonomic needs to detect.
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "2000m"
+              memory: "128Mi"

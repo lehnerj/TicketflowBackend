@@ -26,6 +26,13 @@ spring:
     request:
       timeout: 10s
 
+# ── CPU burn (noisy-neighbour / load demo) ──────────────────────────────────
+# Duration in milliseconds that each WRITE request spends in a CPU-bound
+# prime sieve before hitting Cassandra.  Configurable at runtime via the
+# CPU_BURN_MS environment variable.  Set to 0 to disable.
+app:
+  cpu-burn-ms: ${CPU_BURN_MS:10}
+
 server:
   port: 8080
 

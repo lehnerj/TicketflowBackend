@@ -1,16 +1,16 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-# eclipse-temurin:17-jdk-alpine has no arm64 variant; use the Debian-slim tag
-# which is published for both linux/amd64 and linux/arm64.
-FROM eclipse-temurin:17-jdk AS builder
+# maven:3.9-eclipse-temurin-17 ships both JDK 17 and Maven — no apt install needed.
+# Published for linux/amd64 and linux/arm64.
+FROM maven:3.9-eclipse-temurin-17 AS builder
 WORKDIR /workspace
 
+# Copy pom.xml first so the dependency-download layer is cached independently
+# of source changes.  Re-downloaded only when pom.xml actually changes.
 COPY pom.xml .
-COPY src ./src
+RUN mvn -q -B dependency:go-offline
 
-RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends maven && \
-    rm -rf /var/lib/apt/lists/* && \
-    mvn -q -B package -DskipTests
+COPY src ./src
+RUN mvn -q -B package -DskipTests
 
 # Extract layered jar for a smaller final image
 RUN java -Djarmode=layertools \

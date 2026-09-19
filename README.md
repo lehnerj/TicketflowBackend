@@ -20,12 +20,13 @@
 12. [Health & Observability Endpoints](#health--observability-endpoints)
 13. [Instana Integration](#instana-integration)
 14. [Turbonomic Integration](#turbonomic-integration)
+15. [Noisy-Neighbour Demo](#noisy-neighbour-demo)
 
 ---
 
 ## Overview
 
-TicketFlow simulates a concert-ticket booking platform. A **load driver** sends a continuous stream of `POST /api/event` requests to the backend. Each request carries an `action` (`WRITE` or `SEARCH`) and an `expectedOutcome` (`SUCCESS` or `FAILURE`). The backend either persists data to Cassandra or deliberately returns an HTTP 500, giving Instana a rich mix of successful traces, database spans, and error traces to visualise — and giving Turbonomic real CPU/memory pressure to act on.
+TicketFlow simulates a concert-ticket booking platform. A **load driver** sends a continuous stream of `POST /api/event/{action}/{outcome}/{iteration}` requests to the backend. The URL encodes the action (`write` or `search`), the expected outcome (`success` or `failure`), and a globally unique iteration counter. The backend either persists data to Cassandra or deliberately returns an HTTP 500, giving Instana a rich mix of successful traces, database spans, and error traces to visualise — and giving Turbonomic real CPU/memory pressure to act on.
 
 ---
 
@@ -34,7 +35,7 @@ TicketFlow simulates a concert-ticket booking platform. A **load driver** sends 
 ```
 Load Driver
     │
-    │  POST /api/event  (JSON)
+    │  POST /api/event/{action}/{outcome}/{iteration}  (JSON body)
     ▼
 ┌─────────────────────────────────┐
 │  ticketflow-backend             │  Spring Boot 3 · Java 17
@@ -81,7 +82,7 @@ ticketflow-backend/
 ├── src/main/java/com/ibm/ticketflow/
 │   ├── TicketFlowApplication.java                  # Spring Boot entry point
 │   ├── controller/
-│   │   └── EventController.java                    # POST /api/event handler
+│   │   └── EventController.java                    # POST /api/event/{action}/{outcome}/{iteration} handler
 │   ├── model/
 │   │   ├── EventRequest.java                       # Request payload record + enums
 │   │   └── TicketEvent.java                        # Cassandra entity (@Table ticket_events)
@@ -105,9 +106,17 @@ ticketflow-backend/
 
 ## API Reference
 
-### `POST /api/event`
+### `POST /api/event/{action}/{outcome}/{iteration}`
 
-Accepts a JSON body matching the `EventRequest` record and returns a JSON response.
+`action`, `outcome`, and `iteration` are **path variables**. The full `EventRequest` JSON is still sent as the request body — the path variables and body fields are redundant by design so that Instana can group traces by the URL pattern automatically.
+
+#### Path variables
+
+| Variable | Values | Description |
+|---|---|---|
+| `{action}` | `write` \| `search` | Case-insensitive. `write` inserts a row; `search` reads all rows |
+| `{outcome}` | `success` \| `failure` | Case-insensitive. `failure` bypasses Cassandra and forces an HTTP 500 |
+| `{iteration}` | `int` | Globally unique, 1-based request counter from the load driver |
 
 #### Request body
 
@@ -124,8 +133,8 @@ Accepts a JSON body matching the `EventRequest` record and returns a JSON respon
 |---|---|---|
 | `iteration` | `int` | Globally unique, 1-based request counter from the load driver |
 | `sentAt` | `string` | ISO-8601 timestamp set by the load driver at request creation time |
-| `action` | `WRITE` \| `SEARCH` | `WRITE` inserts a row; `SEARCH` reads all rows |
-| `expectedOutcome` | `SUCCESS` \| `FAILURE` | `FAILURE` bypasses Cassandra and forces an HTTP 500 |
+| `action` | `WRITE` \| `SEARCH` | Must match the `{action}` path variable (uppercase in body) |
+| `expectedOutcome` | `SUCCESS` \| `FAILURE` | Must match the `{outcome}` path variable (uppercase in body) |
 
 #### Response matrix
 
@@ -138,7 +147,7 @@ Accepts a JSON body matching the `EventRequest` record and returns a JSON respon
 #### Example — successful write
 
 ```bash
-curl -s -X POST http://localhost:8080/api/event \
+curl -s -X POST http://localhost:8080/api/event/write/success/1 \
   -H "Content-Type: application/json" \
   -d '{"iteration":1,"sentAt":"2024-06-01T12:00:00Z","action":"WRITE","expectedOutcome":"SUCCESS"}'
 ```
@@ -155,7 +164,7 @@ curl -s -X POST http://localhost:8080/api/event \
 #### Example — intentional failure
 
 ```bash
-curl -s -X POST http://localhost:8080/api/event \
+curl -s -X POST http://localhost:8080/api/event/write/failure/2 \
   -H "Content-Type: application/json" \
   -d '{"iteration":2,"sentAt":"2024-06-01T12:00:01Z","action":"WRITE","expectedOutcome":"FAILURE"}'
 ```
@@ -167,6 +176,34 @@ curl -s -X POST http://localhost:8080/api/event \
   "message": "Intentional failure as requested by load driver"
 }
 ```
+
+#### Example — search
+
+```bash
+curl -s -X POST http://localhost:8080/api/event/search/success/101 \
+  -H "Content-Type: application/json" \
+  -d '{"iteration":101,"sentAt":"2024-06-01T12:00:05Z","action":"SEARCH","expectedOutcome":"SUCCESS"}'
+```
+
+```json
+{
+  "status": "SUCCESS",
+  "action": "SEARCH",
+  "iteration": 101,
+  "count": 98
+}
+```
+
+#### Instana URL grouping
+
+Because the iteration counter is a path segment, Instana automatically groups all calls into exactly these four patterns:
+
+| Pattern | Meaning |
+|---|---|
+| `POST /api/event/write/success/{iteration}` | Normal write operations |
+| `POST /api/event/write/failure/{iteration}` | Intentional write errors |
+| `POST /api/event/search/success/{iteration}` | Normal search operations |
+| `POST /api/event/search/failure/{iteration}` | Intentional search errors |
 
 ---
 
@@ -252,8 +289,10 @@ The [`Dockerfile`](Dockerfile) uses a **two-stage build**:
 
 | Stage | Base image | Purpose |
 |---|---|---|
-| `builder` | `eclipse-temurin:17-jdk-alpine` | Compile + package the fat-jar and extract layers |
-| runtime | `eclipse-temurin:17-jre-alpine` | Minimal JRE, non-root user, layered Spring Boot |
+| `builder` | `maven:3.9-eclipse-temurin-17` | JDK 17 + Maven pre-installed — no `apt install` needed |
+| runtime | `eclipse-temurin:17-jre` | Minimal JRE, non-root user, layered Spring Boot |
+
+The `pom.xml` is copied and dependencies are downloaded (`mvn dependency:go-offline`) **before** `src/` is copied. This means the dependency layer is cached by Podman/Docker and only re-downloaded when `pom.xml` actually changes — not on every source code edit.
 
 JVM flags applied at runtime:
 - `-XX:+UseContainerSupport` — respects the cgroup CPU/memory limits set by Kubernetes
@@ -262,8 +301,10 @@ JVM flags applied at runtime:
 ### Build and push manually
 
 ```bash
-./build-and-push.sh          # defaults to tag 1.0.0
-./build-and-push.sh 1.1.0    # custom tag
+./build-and-push.sh                   # tag 1.0.0, no deploy
+./build-and-push.sh 1.1.0             # custom tag, no deploy
+./build-and-push.sh --deploy          # tag 1.0.0 + rolling restart
+./build-and-push.sh 1.1.0 --deploy    # custom tag + rolling restart
 ```
 
 The script builds a **multi-arch image** (`linux/amd64` + `linux/arm64`) and pushes two tags:
@@ -272,6 +313,18 @@ The script builds a **multi-arch image** (`linux/amd64` + `linux/arm64`) and pus
 |---|---|
 | `lehnerj1207/ticketflow:backend-<version>` | Immutable versioned tag |
 | `lehnerj1207/ticketflow:backend-latest` | Floating convenience tag |
+
+### Ensuring the cluster picks up a new image without changing the tag
+
+The Deployment uses `imagePullPolicy: Always`, so every new Pod start pulls the latest image from the registry. However, `kubectl apply` on an **unchanged manifest does nothing** — no new Pod is started, no new image is pulled.
+
+Use one of these approaches:
+
+| Approach | Command | When to use |
+|---|---|---|
+| `--deploy` flag | `./build-and-push.sh --deploy` | Easiest — push + restart in one step |
+| Manual rollout restart | `kubectl rollout restart deployment/ticketflow-backend -n ticketflow` | When you pushed separately |
+| Watch rollout | `kubectl rollout status deployment/ticketflow-backend -n ticketflow` | Verify the new pods are up |
 
 ---
 
@@ -422,7 +475,7 @@ annotations:
 
 What Instana captures out of the box:
 
-- **Every HTTP span** on `POST /api/event` — including the intentional 500s, which appear as error traces
+- **Every HTTP span** on `POST /api/event/{action}/{outcome}/{iteration}` — including the intentional 500s, which appear as error traces
 - **Every Cassandra span** — table name, CQL query type, latency
 - **Log correlation** — the `traceId` MDC field in every log line links directly to the trace in the Instana UI
 - **Service map** — Load Driver → ticketflow-backend → Cassandra topology is automatically discovered
@@ -438,3 +491,64 @@ Turbonomic discovers the `ticketflow-backend` pods via its Kubernetes probe and 
 3. Detect Cassandra heap pressure and recommend a **memory resize** on the StatefulSet
 
 This gives presales the live story: *"We can see the problem in Instana, and Turbonomic is already telling us how to fix the resource allocation."*
+
+---
+
+## Noisy-Neighbour Demo
+
+[`k8s/noisy-neighbour.yaml`](k8s/noisy-neighbour.yaml) deploys a `stress-ng` pod that burns CPU on the **same node** as `ticketflow-backend` (enforced by `podAffinity`). This creates realistic resource contention without touching the application code.
+
+### How it works
+
+```
+Node A
+├── ticketflow-backend   ← real workload
+└── noisy-neighbour      ← stress-ng, co-located by podAffinity
+        burns ~1.6 cores → starves the backend → response time rises
+```
+
+When Turbonomic detects the contention it recommends (or executes) a **pod move**:
+
+```
+Before                         After Turbonomic action
+──────────────────────         ──────────────────────────────
+Node A  ticketflow-backend  →  Node B  ticketflow-backend  ← stable
+Node A  noisy-neighbour        Node A  noisy-neighbour     ← stays behind
+```
+
+### Demo step-by-step
+
+```bash
+# 1. Make sure the load driver is running and Instana shows baseline response times
+
+# 2. Deploy the noisy neighbour — CPU contention starts immediately
+kubectl apply -f k8s/noisy-neighbour.yaml
+
+# 3. Verify co-location (both pods must be on the same node)
+kubectl get pods -n ticketflow -o wide
+
+# 4. Watch response times rise in Instana
+#    POST /api/event/write/success/{iteration} latency should increase visibly
+
+# 5. In Turbonomic: observe the "Move Pod" action for ticketflow-backend
+#    Either let Turbonomic execute it automatically (if in automation mode)
+#    or approve it manually in the Actions view
+
+# 6. After the pod move: response times return to baseline on the new node
+
+# 7. Clean up the stressor when the demo is done
+kubectl delete -f k8s/noisy-neighbour.yaml
+```
+
+### Tuning the load
+
+Edit the `stress-ng` command in [`k8s/noisy-neighbour.yaml`](k8s/noisy-neighbour.yaml) to match your cluster:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `--cpu 2` | 2 workers | Number of CPU stressor threads |
+| `--cpu-load 80` | 80 % | Target utilisation per worker (~1.6 cores total) |
+
+Increase `--cpu` if your nodes have many cores and the default load is not enough to affect response times. Increase `--cpu-load` towards 100 % for more aggressive saturation.
+
+> **Note on `requests` vs actual usage:** The stressor pod is deliberately configured with a low CPU *request* (`100m`) so the scheduler places it freely next to the backend. The CPU *limit* is `2000m` — the actual burn. This mismatch is exactly what creates the "noisy neighbour" effect that Turbonomic is designed to detect.
