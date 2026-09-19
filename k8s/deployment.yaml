@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ticketflow-backend
+  namespace: ticketflow
+  labels:
+    app: ticketflow-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ticketflow-backend
+  template:
+    metadata:
+      labels:
+        app: ticketflow-backend
+      annotations:
+        # ── Instana auto-instrumentation ──────────────────────────────────────
+        instana.io/agent-configuration: |
+          com.instana.plugin.javatrace:
+            instrumentation:
+              sdk:
+                packages:
+                  - 'com.ibm.ticketflow'
+    spec:
+      # ── OpenShift compatibility ───────────────────────────────────────────────
+      securityContext:
+        runAsNonRoot: true
+      # ── Keyspace init ─────────────────────────────────────────────────────────
+      # Runs before the main container starts.  Waits until Cassandra's CQL port
+      # is reachable, then creates the keyspace if it does not already exist.
+      # Uses the same cassandra:5.0 image so cqlsh is guaranteed to be present.
+      initContainers:
+        - name: create-keyspace
+          image: docker.io/library/cassandra:5.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+          env:
+            - name: CASSANDRA_CONTACT_POINTS
+              valueFrom:
+                configMapKeyRef:
+                  name: ticketflow-config
+                  key: CASSANDRA_CONTACT_POINTS
+            - name: CASSANDRA_KEYSPACE
+              valueFrom:
+                configMapKeyRef:
+                  name: ticketflow-config
+                  key: CASSANDRA_KEYSPACE
+            - name: CASSANDRA_DATACENTER
+              valueFrom:
+                configMapKeyRef:
+                  name: ticketflow-config
+                  key: CASSANDRA_DATACENTER
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Waiting for Cassandra at ${CASSANDRA_CONTACT_POINTS}:9042 ..."
+              until cqlsh "${CASSANDRA_CONTACT_POINTS}" 9042 -e "DESCRIBE keyspaces" > /dev/null 2>&1; do
+                echo "  CQL not ready yet – retrying in 5s"
+                sleep 5
+              done
+              echo "Cassandra is up. Creating keyspace '${CASSANDRA_KEYSPACE}' if needed ..."
+              cqlsh "${CASSANDRA_CONTACT_POINTS}" 9042 -e "
+                CREATE KEYSPACE IF NOT EXISTS ${CASSANDRA_KEYSPACE}
+                WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}
+                AND durable_writes = true;
+              "
+              echo "Keyspace '${CASSANDRA_KEYSPACE}' is ready."
+      containers:
+        - name: ticketflow-backend
+          image: lehnerj1207/ticketflow:backend-latest
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # seccompProfile.RuntimeDefault is supported from OCP 4.11+.
+            # Uncomment the two lines below if your cluster is 4.11 or newer:
+            # seccompProfile:
+            #   type: RuntimeDefault
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: ticketflow-config
+          env:
+            - name: CASSANDRA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: cassandra-secret
+                  key: username
+            - name: CASSANDRA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cassandra-secret
+                  key: password
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"

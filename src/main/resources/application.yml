@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: ticketflow-backend
+
+  # ── Lazy initialisation ──────────────────────────────────────────────────────
+  # Beans are created on first use rather than at startup.  This prevents the
+  # cassandraTemplate bean from failing the entire application context when
+  # Cassandra is still starting up (race condition in Kubernetes/OCP).
+  main:
+    lazy-initialization: true
+
+  # ── Cassandra ───────────────────────────────────────────────────────────────
+  cassandra:
+    contact-points: ${CASSANDRA_CONTACT_POINTS:cassandra}
+    port: ${CASSANDRA_PORT:9042}
+    keyspace-name: ${CASSANDRA_KEYSPACE:ticketflow}
+    local-datacenter: ${CASSANDRA_DATACENTER:datacenter1}
+    username: ${CASSANDRA_USERNAME:cassandra}
+    password: ${CASSANDRA_PASSWORD:cassandra}
+    schema-action: CREATE_IF_NOT_EXISTS    # auto-creates the table on first boot
+    # Retry connecting for up to ~5 minutes before giving up.
+    # The driver retries internally; this gives Cassandra time to become ready.
+    connection:
+      connect-timeout: 10s
+      init-query-timeout: 10s
+    request:
+      timeout: 10s
+
+server:
+  port: 8080
+
+# ── Actuator (liveness + readiness probes) ──────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true

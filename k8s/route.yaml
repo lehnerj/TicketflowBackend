@@ -1,0 +1,25 @@
+# OpenShift Route — exposes ticketflow-backend outside the cluster.
+# OpenShift's router (HAProxy) terminates TLS and forwards to the ClusterIP Service.
+#
+# The hostname is auto-assigned by the router if omitted; set it explicitly
+# if you have a known subdomain (e.g. ticketflow.apps.mycluster.example.com).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ticketflow-backend
+  namespace: ticketflow
+  labels:
+    app: ticketflow-backend
+spec:
+  # Uncomment and set if you want a fixed hostname:
+  # host: ticketflow.apps.<cluster-domain>
+  to:
+    kind: Service
+    name: ticketflow-backend
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ticketflow-config
+  namespace: ticketflow
+data:
+  CASSANDRA_CONTACT_POINTS: "cassandra"
+  CASSANDRA_PORT:            "9042"
+  CASSANDRA_KEYSPACE:        "ticketflow"
+  CASSANDRA_DATACENTER:      "datacenter1"

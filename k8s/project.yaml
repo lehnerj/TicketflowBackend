@@ -1,0 +1,12 @@
+# On OpenShift, projects are the first-class namespace equivalent.
+# Use this instead of a raw Namespace manifest.
+#
+# Apply with:  oc apply -f k8s/project.yaml
+# Or simply:   oc new-project ticketflow --description="TicketFlow IBM presales demo"
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  name: ticketflow
+  annotations:
+    openshift.io/description: "TicketFlow – IBM presales demo (Instana + Turbonomic)"
+    openshift.io/display-name: "TicketFlow"

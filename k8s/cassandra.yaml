@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cassandra
+  namespace: ticketflow
+  labels:
+    app: cassandra
+spec:
+  serviceName: cassandra
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cassandra
+  template:
+    metadata:
+      labels:
+        app: cassandra
+    spec:
+      # ── OpenShift: dedicated ServiceAccount that holds anyuid SCC ─────────────
+      serviceAccountName: cassandra-sa
+      # fsGroup makes the PVC mount group-writable by GID 999 (cassandra).
+      # runAsNonRoot is intentionally NOT set at pod level — the init container
+      # must run as root (UID 0) to chown the data directory.  It is enforced on
+      # the main container directly instead.
+      securityContext:
+        fsGroup: 999
+      initContainers:
+        - name: cassandra-init-chown
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 999:999 /var/lib/cassandra"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/cassandra
+      containers:
+        - name: cassandra
+          image: docker.io/library/cassandra:5.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            allowPrivilegeEscalation: false
+            # Do NOT drop ALL capabilities — the Cassandra JVM needs them for
+            # internal socket and file-descriptor operations.
+          ports:
+            - containerPort: 9042
+              name: cql
+          env:
+            - name: CASSANDRA_CLUSTER_NAME
+              value: DemoCluster
+            - name: CASSANDRA_DC
+              value: datacenter1
+            - name: CASSANDRA_RACK
+              value: rack1
+            - name: MAX_HEAP_SIZE
+              value: 512M
+            - name: HEAP_NEWSIZE
+              value: 128M
+          readinessProbe:
+            tcpSocket:
+              port: 9042
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12      # 12 × 10s = 2 minutes of retries
+          livenessProbe:
+            tcpSocket:
+              port: 9042
+            initialDelaySeconds: 90
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/cassandra
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cassandra
+  namespace: ticketflow
+  labels:
+    app: cassandra
+spec:
+  clusterIP: None          # headless – required for StatefulSet peer discovery
+  selector:
+    app: cassandra
+  ports:
+    - port: 9042
+      name: cql
