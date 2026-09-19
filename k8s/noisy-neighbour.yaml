@@ -57,31 +57,31 @@ spec:
 
       containers:
         - name: stressor
-          image: docker.io/library/ubuntu:24.04
+          # docker.io/polinux/stress-ng is a public image that ships stress-ng
+          # as its entrypoint — no apt-get, no shell needed, runs as non-root.
+          image: docker.io/polinux/stress-ng:latest
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
 
-          # Install stress-ng at start-up and run it immediately.
-          # No custom image needed — ubuntu:24.04 is already pulled for most clusters.
-          command:
-            - /bin/bash
-            - -c
-            - |
-              apt-get update -qq && apt-get install -y --no-install-recommends stress-ng
-              echo "▶ Starting CPU stress: 2 workers at 80% each"
-              exec stress-ng --cpu 2 --cpu-load 80 --metrics-brief --timeout 0
+          args:
+            - --cpu
+            - "12"          # 12 of 16 cores → backend can no longer claim its 4-core limit
+            - --cpu-load
+            - "100"
+            - --metrics-brief
+            - --timeout
+            - "0"
 
           resources:
-            # Requests are intentionally LOW so the scheduler places this pod
-            # on the same node as the backend without requiring spare capacity.
-            # The actual CPU consumption (~1.6 cores) creates the contention
-            # that Turbonomic needs to detect.
+            # Request stays LOW so the scheduler co-locates this pod freely.
+            # No CPU limit — the stressor consumes all available node CPU,
+            # forcing the backend to compete for its guaranteed 250m request slice.
+            # Memory limit kept to prevent OOMKill of the node.
             requests:
               cpu: "100m"
               memory: "64Mi"
             limits:
-              cpu: "2000m"
               memory: "128Mi"
